@@ -1,6 +1,6 @@
 # Jellyfin + qBittorrent VPN Stack
 
-WireGuard VPN tunnel with qBittorrent routed through it, Jellyfin for media streaming.
+Gluetun VPN tunnel with WireGuard (via PIA), qBittorrent routed through it, Jellyfin for media streaming.
 
 ## Architecture
 
@@ -9,20 +9,20 @@ WireGuard VPN tunnel with qBittorrent routed through it, Jellyfin for media stre
 │                     Host Machine                         │
 │                                                          │
 │  ┌──────────────┐     ┌─────────────────────────────┐    │
-│  │   Jellyfin   │────▶│     VPN Container (wg0)     │    │
-│  │  :8096       │     │  WireGuard PIA Server --------------> Anonymous Internet
+│  │   Jellyfin   │────▶│     VPN Container (gluetun) │    │
+│  │  :8096       │     │  PIA Server --------------------> Anonymous Internet
 │  └──────────────┘     └─────────────────────────────┘    │
 │                                  │                       │
 │                                  │ network_mode: service │
 │                                  ▼                       │
 │                          ┌─────────────────┐             │
 │                          │   qBittorrent   │             │
-│                          │   :8080         │             x
+│                          │   :8080         │             │
 │                          └─────────────────┘             │
-└────────────────────────────────────────────────────────x─┘
+└──────────────────────────────────────────────────────────┘
 ```
 
-- **VPN Container**: Creates WireGuard tunnel to PIA
+- **VPN Container**: Gluetun with PIA provider for WireGuard tunnel
 - **qBittorrent**: All traffic routed through VPN via fwmark
 - **Jellyfin**: Direct access, reaches qBittorrent via internal network
 
@@ -30,25 +30,30 @@ WireGuard VPN tunnel with qBittorrent routed through it, Jellyfin for media stre
 
 ## Containers
 
-### 1. VPN Container (`pia-wireguard`)
+### 1. VPN Container (`vpn`)
 
-WireGuard VPN tunnel to PIA servers. All VPN magic happens here.
+Gluetun VPN tunnel to PIA servers with WireGuard and dynamic port forwarding.
 
 **Login**: N/A - no WebUI
 
 **Configuration**:
 ```yaml
 environment:
-  - PIA_USER=<your_pia_username>
-  - PIA_PASS=<your_pia_password>
-  - PIA_SERVER=<server_location>          # e.g., switzerland, netherlands
-  - VPN_PORT_FORWARDING=enabled
+  - VPN_SERVICE_PROVIDER=private_internet_access
+  - WIREGUARD_IMPLEMENTATION=linux kernel
+  - SERVER_REGIONS=<region>                    # e.g., switzerland, netherlands
+  - PORT_FORWARDING=on
   - LOCAL_NETWORK=192.168.1.0/24
+  - WG_ADDRESS=<your_wg_address>              # e.g., 10.0.0.2/32
+  - WG_PRIVATE_KEY=<your_private_key>
+  - WG_PUBLIC_KEY=<your_public_key>
+  - WG_ENDPOINT_IP=<server_ip>
+  - WG_ENDPOINT_PORT=51820
 ```
 
 **Key Files**:
-- `pia/private_key` - WireGuard private key
-- `pia-shared/` - Port forwarding scripts and state
+- `gluetun/` - Gluetun data directory
+- `/gluetun/port` - Current forwarded port (updated dynamically)
 
 ---
 
@@ -61,15 +66,17 @@ Torrent client with WebUI for remote management. All connections forced through 
 | Field | Value |
 |-------|-------|
 | Username | `admin` |
-| Password | **Get from container logs** (see below) |
+| Password | `adminadmin` (pre-configured) |
 
 **Initial Setup**:
-1. Change default password immediately
-2. Set **Listening Port** to `51697` (PIA forwarded port) - Settings → Connection → Listening Port
-3. Enable WireGuard port forwarding integration (Settings → Advanced → Network Interface → `wg0`)
-4. Verify connection: Settings → Connection → "Bind to IP address" should be `0.0.0.0`
-
-> **Note**: PIA forwards port 51697. This port must match qBittorrent's listening port for incoming peers. See [LinuxServer qBittorrent docs](https://docs.linuxserver.io/images/docker-qbittorrENT).
+1. Spin up the pod once to generate initial config
+2. Stop the pod and edit `./qbittorrent/qBittorrent/qBittorrent.conf`:
+   ```
+   WebUI\Password_PBKDF2="@ByteArray(ARQ77eY1NUZaQsuDHbIMCA==:0WMRkYTUWVT9wVvdDtHAjU9b3b7uB8NR1Gur2hmQCvCDpm39Q+PsJRJPaCU51dEiz+dTzh8qbPsL8WkFljQYFQ==)"
+   ```
+3. Restart the pod and login with `admin` / `adminadmin`
+4. Change to a strong password in WebUI - this will persist on future restarts
+5. Port is automatically configured from gluetun's port forwarding
 
 ---
 
@@ -94,29 +101,21 @@ Media server with WebUI for streaming content.
 
 ## Getting Passwords & Logs
 
-### qBittorrent Password
-
-```bash
-# Get the auto-generated password from logs
-podman logs qbittorrent 2>&1 | grep -i password
-```
-
-
 ### VPN Container Logs
 
 ```bash
 # Check VPN connection status
-podman logs pia-wireguard 2>&1 | tail -50
+podman logs vpn 2>&1 | tail -50
 
 # Check port forwarding status
-podman exec pia-wireguard cat /pia-shared/port_forwarding_status.json
+podman exec vpn cat /gluetun/port
 ```
 
 ### All Container Logs
 
 ```bash
 # Tail all container logs
-podman logs -f pia-wireguard &
+podman logs -f vpn &
 podman logs -f qbittorrent &
 podman logs -f jellyfin &
 ```
@@ -127,14 +126,9 @@ podman logs -f jellyfin &
 
 ### 1. Verify qBittorrent Traffic Goes Through VPN
 
-Check if qBittorrent processes are routing through WireGuard:
-
 ```bash
-# Check fwmark rules (qBittorrent should use 0xca6c)
+# Check fwmark rules (qBittorrent should use gluetun's fwmark)
 sudo nft list ruleset | grep -A5 "fwmark"
-
-# Check VPN routing table
-ip route show table 51820
 
 # Verify qBittorrent network namespace
 podman exec qbittorrent ss -tlnp | grep qbittorrent
@@ -143,14 +137,13 @@ podman exec qbittorrent ss -tlnp | grep qbittorrent
 ### 2. Verify VPN is Connected
 
 ```bash
-# Check WireGuard interface
-ip link show wg0
-ip addr show wg0
+# Check VPN status
+podman logs vpn 2>&1 | grep -i "connected\|initialized"
 
-# Check if traffic flows through wg0
-watch -n1 'sudo ip -s link show wg0'
+# Check for tun device
+podman exec vpn ls /dev/tun
 
-# Verify no DNS leaks (should show PIA DNS)
+# Verify DNS goes through VPN (should show PIA DNS)
 podman exec qbittorrent cat /etc/resolv.conf
 ```
 
@@ -171,28 +164,25 @@ podman exec qbittorrent ss -tunp | grep qbittorrent
 ### 4. Check Port Forwarding Status
 
 ```bash
-# Get forwarded port from PIA
-podman exec pia-wireguard cat /pia-shared/port_forwarding_status.json
-
-# Verify port is open externally (optional)
-curl "https://check-host.net/check-port?host=YOUR_PIA_IP&port=YOUR_FORWARDED_PORT"
+# Get forwarded port from gluetun
+podman exec vpn cat /gluetun/port
 ```
 
 ### 5. Verify Jellyfin Can Access Downloads
 
 ```bash
 # Check Jellyfin can read the download directory
-podman exec jellyfin ls -la /media/downloads
+podman exec jellyfin ls -la /data
 
 # Check permissions
-podman exec jellyfin stat /media/downloads
+podman exec jellyfin stat /data
 ```
 
 ### 6. Common Connectivity Issues
 
 ```bash
 # VPN DNS not working - restart VPN container
-podman restart pia-wireguard
+podman restart vpn
 
 # qBittorrent can't connect - check VPN is up first
 podman logs qbittorrent | grep -i error
@@ -204,18 +194,75 @@ sudo chown -R 1000:1000 /path/to/media
 
 ---
 
+## WireGuard Setup with pia-wg-config
+
+This stack uses WireGuard instead of OpenVPN for better performance. WireGuard configuration is generated using [pia-wg-config](https://github.com/kylegrantlucas/pia-wg-config).
+
+### Installing pia-wg-config
+
+```bash
+# Install Go if not installed
+sudo apt-get update && sudo apt-get install golang-go
+
+# Install pia-wg-config
+go install github.com/kylegrantlucas/pia-wg-config@latest
+
+# Verify installation
+pia-wg-config --help
+```
+
+### Generating WireGuard Configuration
+
+```bash
+# List available regions
+pia-wg-config regions
+
+# Generate WireGuard config (outputs to stdout)
+pia-wg-config -r <region> PIA_USERNAME PASSWORD
+
+# Generate and save to file
+pia-wg-config -r us_california -o wg0.conf your_pia_username your_password
+```
+
+The tool generates WireGuard config with:
+- Your unique private/public key pair
+- PIA server endpoint
+- DNS servers
+- Persistent keepalive
+
+### Required WireGuard Environment Variables
+
+After generating the config, extract these values for your container environment:
+
+| Variable | Description | Source |
+|----------|-------------|--------|
+| `WG_ADDRESS` | Your WireGuard client address | From generated config |
+| `WG_PRIVATE_KEY` | Your private key | From generated config |
+| `WG_PUBLIC_KEY` | Your public key | From generated config |
+| `WG_ENDPOINT_IP` | VPN server IP | From generated config (Endpoint) |
+| `WG_ENDPOINT_PORT` | VPN server port | From generated config (51820) |
+| `PIA_USER` | PIA username | Your PIA account |
+| `PIA_PASS` | PIA password | Your PIA account |
+
+---
+
 ## Environment Variables
 
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `PIA_USER` | PIA username | Yes |
 | `PIA_PASS` | PIA password | Yes |
-| `PIA_SERVER` | Server region (e.g., switzerland, netherlands) | Yes |
-| `VPN_PORT_FORWARDING` | Enable PIA port forwarding | Yes |
+| `PIA_LOCATION` | Server region (e.g., switzerland, netherlands) | Yes |
 | `LOCAL_NETWORK` | Host network CIDR | Yes |
-| `WEBUI_PORT` | qBittorrent WebUI port | Yes |
-| `PUID/PGID` | Jellyfin user ID | Optional |
-| `TZ` | Timezone | Optional |
+| `USER_ID` | qBittorrent/Jellyfin user ID | Yes |
+| `GROUP_ID` | qBittorrent/Jellyfin group ID | Yes |
+| `TIMEZONE` | Timezone | Yes |
+| `MEDIA_ROOT` | Path to media files | Yes |
+| `WG_ADDRESS` | WireGuard client address | Yes |
+| `WG_PRIVATE_KEY` | WireGuard private key | Yes |
+| `WG_PUBLIC_KEY` | WireGuard public key | Yes |
+| `WG_ENDPOINT_IP` | WireGuard server IP | Yes |
+| `WG_ENDPOINT_PORT` | WireGuard server port (default: 51820) | Yes |
 
 ---
 
@@ -224,8 +271,8 @@ sudo chown -R 1000:1000 /path/to/media
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | Jellyfin | `http://host:8096` | Create account on first login |
-| qBittorrent | `http://host:8080` | admin / [from logs] |
-| PIA VPN | N/A | user + pass + location in env |
+| qBittorrent | `http://host:8080` | admin / adminadmin |
+| PIA VPN | N/A | WireGuard config via pia-wg-config |
 
 ---
 
@@ -235,7 +282,7 @@ sudo chown -R 1000:1000 /path/to/media
 # Pull latest images
 podman pull lscr.io/linuxserver/jellyfin:latest
 podman pull lscr.io/linuxserver/qbittorrent:libtorrentv1
-podman pull ghcr.io/thrnz/docker-wireguard-pia:latest
+podman pull qmcgaw/gluetun:latest
 
 # Restart containers
 podman-compose down
