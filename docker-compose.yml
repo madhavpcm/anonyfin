@@ -125,8 +125,6 @@ services:
       - SYS_ADMIN
     environment:
       - PODMAN_USERNS=keep-id
-      - PUID=${USER_ID}
-      - PGID=${GROUP_ID}
       - TZ=${TIMEZONE}
     volumes:
       - ./jellyfin:/config
@@ -208,6 +206,53 @@ services:
       vpn:
         condition: service_started
     restart: unless-stopped
+
+  flaresolverr:
+    # DockerHub mirror flaresolverr/flaresolverr:latest
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    network_mode: "service:vpn"
+    environment:
+      - LOG_LEVEL=info
+      - LOG_FILE=none
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=${CAPTCHA_SOLVER:-none}
+      - TZ=Asia/Singapore
+    ports:
+      - "${PORT:-8191}:8191"
+    volumes:
+      - ./flaresolver:/config
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  seerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    init: true
+    container_name: seerr
+    environment:
+      - LOG_LEVEL=info
+      - TZ=${TIMEZONE}
+      - PORT=5055
+    volumes:
+      - ./seerr:/app/config
+    ports:
+      - "5055:5055"
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:5055/api/v1/settings/public || exit 1
+      start_period: 20s
+      timeout: 3s
+      interval: 15s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      vpn_net:
+        ipv4_address: 10.100.0.4
+      jellyfin_net:
+        ipv4_address: 10.200.0.3
+
 
 networks:
   vpn_net:
