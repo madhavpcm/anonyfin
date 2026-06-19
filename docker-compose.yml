@@ -78,6 +78,9 @@ services:
       - "8989:8989" # Sonarr
       - "9696:9696" # Prowlarr
       - "6767:6767" # Bazarr
+      - "8096:8096" # Jellyfin
+      - "7359:7359/udp" # Jellyfin DLNA
+      - "1900:1900/udp" # Jellyfin SSDP
 
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:libtorrentv1
@@ -130,18 +133,11 @@ services:
       - ./jellyfin:/config
       - ${MEDIA_ROOT}:/data:z
       - /etc/localtime:/etc/localtime:ro
-    ports:
-      - "8096:8096"
-      - "7359:7359/udp"
-      - "1900:1900/udp"
+    network_mode: "service:vpn"
+    depends_on:
+      vpn:
+        condition: service_started
     restart: unless-stopped
-    networks:
-      jellyfin_net:
-        ipv4_address: 10.200.0.2
-      vpn_net:
-        ipv4_address: 10.100.0.3
-        aliases:
-          - jellyfin
       
 
   prowlarr:
@@ -192,7 +188,7 @@ services:
     restart: unless-stopped
 
   bazarr:
-    image: lscr.io/linuxserver/bazarr:latest
+    image: lscr.io/linuxserver/bazarr:development-version-v1.5.7-beta.47
     container_name: bazarr
     environment:
       - PUID=${USER_ID}
